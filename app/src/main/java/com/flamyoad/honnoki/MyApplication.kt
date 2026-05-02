@@ -2,8 +2,10 @@ package com.flamyoad.honnoki
 
 import android.app.Application
 import android.os.Build
+import android.os.Process
 import android.webkit.WebView
 import androidx.appcompat.app.AppCompatDelegate
+import kotlin.system.exitProcess
 import com.flamyoad.honnoki.data.preference.UiPreference
 import com.flamyoad.honnoki.di.*
 import com.github.venom.Venom
@@ -28,6 +30,7 @@ class MyApplication : Application() {
     override fun onCreate() {
         super.onCreate()
 
+        installWebViewMultiProcessGuard()
         applyWebViewDataDirectorySuffix()
 
         if (BuildConfig.DEBUG) {
@@ -98,5 +101,58 @@ class MyApplication : Application() {
                 Timber.w(t, "Failed to set WebView data directory suffix for %s", processName)
             }
         }
+    }
+
+    /**
+     * Belt-and-suspenders for https://crbug.com/558377. The data-directory suffix
+     * above prevents the collision when two processes have *different* names, but
+     * the same `RuntimeException` can also be triggered by:
+     *
+     *   - a stale data-dir lock left over from a previously-killed instance of
+     *     this same process (the lock owner PID is gone but the file lock remains);
+     *   - the system swapping the WebView provider implementation while we're
+     *     running, causing two AwBrowserProcess attempts in quick succession.
+     *
+     * In both cases the suffix can't help. Letting the exception propagate kills
+     * the app with a user-visible "App keeps stopping" dialog and a Crashlytics
+     * report (issue #45). Instead we install a fallback handler that recognises
+     * this exact exception, logs it, and silently terminates the current process.
+     * Android's ActivityManager will restart any foreground component cleanly,
+     * by which time the lock will have been released by the OS.
+     *
+     * The handler is intentionally narrow — it only swallows the WebView
+     * multi-process exception. Every other crash is forwarded to the previous
+     * default handler (Crashlytics, etc.) untouched.
+     */
+    private fun installWebViewMultiProcessGuard() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            if (isWebViewMultiProcessCrash(throwable)) {
+                Timber.w(
+                    throwable,
+                    "Swallowing WebView multi-process data-dir crash; killing pid %d to release the lock",
+                    Process.myPid()
+                )
+                Process.killProcess(Process.myPid())
+                exitProcess(10)
+            } else {
+                previous?.uncaughtException(thread, throwable)
+            }
+        }
+    }
+
+    private fun isWebViewMultiProcessCrash(throwable: Throwable?): Boolean {
+        var t: Throwable? = throwable
+        while (t != null) {
+            val msg = t.message
+            if (t is RuntimeException &&
+                msg != null &&
+                msg.contains("Using WebView from more than one process")
+            ) {
+                return true
+            }
+            t = t.cause
+        }
+        return false
     }
 }
