@@ -1,6 +1,8 @@
 package com.flamyoad.honnoki
 
 import android.app.Application
+import android.os.Build
+import android.webkit.WebView
 import androidx.appcompat.app.AppCompatDelegate
 import com.flamyoad.honnoki.data.preference.UiPreference
 import com.flamyoad.honnoki.di.*
@@ -25,6 +27,8 @@ class MyApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+
+        applyWebViewDataDirectorySuffix()
 
         if (BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())
@@ -69,5 +73,30 @@ class MyApplication : Application() {
             .build()
         venom.initialize(notification)
         Venom.setGlobalInstance(venom)
+    }
+
+    /**
+     * Workaround for https://crbug.com/558377 — when the same Android app is launched
+     * in more than one process (e.g. an isolated `:remote` service started by a third
+     * party SDK), the second WebView initialization in the same data directory throws:
+     *
+     *   java.lang.RuntimeException: Using WebView from more than one process at once
+     *   with the same data directory is not supported.
+     *
+     * Setting a per-process suffix before any WebView is touched gives each process
+     * its own data directory and avoids the crash. Available since API 28 (P).
+     *
+     * Tracking issue: https://github.com/flamyoad/Honnoki/issues/45
+     */
+    private fun applyWebViewDataDirectorySuffix() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
+        val processName = getProcessName() ?: return
+        if (packageName != processName) {
+            try {
+                WebView.setDataDirectorySuffix(processName)
+            } catch (t: Throwable) {
+                Timber.w(t, "Failed to set WebView data directory suffix for %s", processName)
+            }
+        }
     }
 }
